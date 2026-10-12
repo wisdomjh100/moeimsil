@@ -118,25 +118,9 @@ export default function VoiceApp() {
   }
 
   function playPresence(kind) {
-    const ctx = audioCtxRef.current;
-    if (!ctx || meRef.current.deafened) return;
-    ctx.resume().catch(() => {});
-    const now = ctx.currentTime;
-    const notes = kind === 'join' ? [523.25, 659.25] : [392, 311.13];
-    notes.forEach((freq, index) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      const start = now + index * 0.08;
-      gain.gain.setValueAtTime(0.0001, start);
-      gain.gain.exponentialRampToValueAtTime(0.07, start + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(start);
-      osc.stop(start + 0.18);
-    });
+    if (meRef.current.deafened) return;
+    const audio = new Audio(kind === 'join' ? '/sounds/join.mp3' : '/sounds/leave.mp3');
+    audio.play().catch(() => {});
   }
 
   function applyParticipants(list) {
