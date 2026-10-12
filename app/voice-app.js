@@ -102,6 +102,7 @@ export default function VoiceApp() {
   const passwordDialog = useRef(null);
   const nickTimer = useRef(0);
   const nicknameRef = useRef('');
+  const presenceIds = useRef(null);
 
   function showToast(message) {
     setToast(message);
@@ -116,12 +117,53 @@ export default function VoiceApp() {
     return next;
   }
 
+  function playPresence(kind) {
+    const ctx = audioCtxRef.current;
+    if (!ctx || meRef.current.deafened) return;
+    ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
+    const notes = kind === 'join' ? [523.25, 659.25] : [392, 311.13];
+    notes.forEach((freq, index) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const start = now + index * 0.08;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.07, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    });
+  }
+
   function applyParticipants(list) {
     const sorted = [...list].sort((a, b) => {
       if (a.id === socketRef.current?.id) return -1;
       if (b.id === socketRef.current?.id) return 1;
       return a.joinedAt - b.joinedAt;
     });
+    const ids = new Set(sorted.map((person) => person.id));
+    const self = socketRef.current?.id;
+    if (!roomRef.current) {
+      presenceIds.current = null;
+    } else if (!presenceIds.current) {
+      presenceIds.current = ids;
+    } else {
+      let joined = false;
+      let left = false;
+      for (const id of ids) {
+        if (id !== self && !presenceIds.current.has(id)) joined = true;
+      }
+      for (const id of presenceIds.current) {
+        if (id !== self && !ids.has(id)) left = true;
+      }
+      presenceIds.current = ids;
+      if (joined) playPresence('join');
+      if (left) playPresence('leave');
+    }
     participantsRef.current = sorted;
     setParticipants(sorted);
     for (const person of sorted) {
