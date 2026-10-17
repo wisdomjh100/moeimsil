@@ -7,6 +7,7 @@ export function createRtcSession({ socket, onTrack, onConnection }) {
   const peers = new Map();
   const signalQueue = [];
   let localStream = null;
+  let micTrack = null;
   let screenStream = null;
   let activeRoomId = null;
   let mediaReady = false;
@@ -138,6 +139,17 @@ export function createRtcSession({ socket, onTrack, onConnection }) {
 
   return {
     setLocalStream(stream) { localStream = stream; },
+    setMicTrack(track) {
+      const previous = micTrack;
+      micTrack = track || null;
+      localStream = track ? new MediaStream([track]) : null;
+      for (const peer of peers.values()) {
+        if (peer.closed) continue;
+        const sender = previous ? peer.pc.getSenders().find((item) => item.track === previous) : null;
+        if (sender) sender.replaceTrack(track).catch((err) => console.warn(err));
+        else if (track) addStreamTracks(peer.pc, localStream);
+      }
+    },
     setScreenStream(stream) { screenStream = stream; },
     setRoom(roomId) { activeRoomId = roomId; },
     setMediaReady(ready) { mediaReady = ready; },

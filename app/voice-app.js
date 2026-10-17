@@ -5,6 +5,7 @@ import { io } from 'socket.io-client';
 import { createRtcSession } from './webrtc';
 
 const NICK_KEY = 'moeim-nickname';
+const AUDIO_KEY = 'moeim-audio';
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 
 function cleanName(value, max) {
@@ -36,6 +37,42 @@ function storeNick(value) {
   try { localStorage.setItem(NICK_KEY, value); } catch { /* private mode */ }
 }
 
+function loadAudio() {
+  const fallback = { micId: '', speakerId: '', micLevel: 100, speakerLevel: 100 };
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AUDIO_KEY) || '{}');
+    return {
+      micId: typeof parsed.micId === 'string' ? parsed.micId : '',
+      speakerId: typeof parsed.speakerId === 'string' ? parsed.speakerId : '',
+      micLevel: clampLevel(parsed.micLevel, 0, 200, 100),
+      speakerLevel: clampLevel(parsed.speakerLevel, 0, 100, 100),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function storeAudio(value) {
+  try { localStorage.setItem(AUDIO_KEY, JSON.stringify(value)); } catch { /* private mode */ }
+}
+
+function clampLevel(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function levelOf(analyser) {
+  const data = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(data);
+  let sum = 0;
+  for (const value of data) {
+    const sample = (value - 128) / 128;
+    sum += sample * sample;
+  }
+  return Math.sqrt(sum / data.length);
+}
+
 function Icon({ name }) {
   const paths = {
     mic: '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>',
@@ -45,6 +82,7 @@ function Icon({ name }) {
     screen: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
     leave: '<path d="M10 7V5H5v14h5v-2"/><path d="M10 12h9"/><path d="M16 9l3 3-3 3"/>',
     lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M18 6l-1.6 1.6M7.6 16.4 6 18"/>',
   };
   return (
     <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: paths[name] }} />
@@ -72,7 +110,7 @@ export default function VoiceApp() {
   const socketRef = useRef(null);
   const rtcRef = useRef(null);
   const roomRef = useRef(null);
-  const meRef = useRef({ muted: false, deafened: false, sharing: false, muteBeforeDeafen: false });
+  const meRef = useRef({ muted: false, deafened: false, sharing: false });
   const participantsRef = useRef([]);
   const remoteVideos = useRef(new Map());
   const remoteAudios = useRef([]);
@@ -103,6 +141,17 @@ export default function VoiceApp() {
   const nickTimer = useRef(0);
   const nicknameRef = useRef('');
   const presenceIds = useRef(null);
+  const audioSettingsRef = useRef(loadAudio());
+  const micGraphRef = useRef(null);
+  const settingsOpenRef = useRef(false);
+  const speakingRef = useRef({});
+  const settingsDialog = useRef(null);
+  const [audioSettings, setAudioSettings] = useState(audioSettingsRef.current);
+  const [mics, setMics] = useState([]);
+  const [speakers, setSpeakers] = useState([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [micMeter, setMicMeter] = useState(0);
+  const [speaking, setSpeaking] = useState({});
 
   function showToast(message) {
     setToast(message);
@@ -118,9 +167,13 @@ export default function VoiceApp() {
   }
 
   function playPresence(kind) {
-    if (meRef.current.deafened) return;
+    if (meRef.current.deafened || audioSettingsRef.current.speakerLevel <= 0) return;
     const audio = new Audio(kind === 'join' ? '/sounds/join.mp3' : '/sounds/leave.mp3');
-    audio.play().catch(() => {});
+    audio.volume = audioSettingsRef.current.speakerLevel / 100;
+    const start = () => audio.play().catch(() => {});
+    if (audioSettingsRef.current.speakerId && typeof audio.setSinkId === 'function') {
+      audio.setSinkId(audioSettingsRef.current.speakerId).then(start).catch(start);
+    } else start();
   }
 
   function applyParticipants(list) {
@@ -158,30 +211,103 @@ export default function VoiceApp() {
 
   function pushState(next = meRef.current) {
     socketRef.current?.emit('state:update', {
-      muted: next.muted || next.deafened,
+      muted: next.muted,
       deafened: next.deafened,
       sharing: next.sharing,
     });
   }
 
+  function outputVolume() {
+    if (meRef.current.deafened) return 0;
+    return audioSettingsRef.current.speakerLevel / 100;
+  }
+
+  function applyOutput() {
+    const volume = outputVolume();
+    const speakerId = audioSettingsRef.current.speakerId;
+    remoteAudios.current.forEach((audio) => {
+      audio.volume = volume;
+      audio.muted = volume <= 0;
+      if (speakerId && typeof audio.setSinkId === 'function') {
+        audio.setSinkId(speakerId).catch(() => {});
+      }
+    });
+  }
+
   function applyMic(stream, flags = meRef.current) {
     stream?.getAudioTracks().forEach((track) => {
-      track.enabled = !flags.muted && !flags.deafened;
+      track.enabled = true;
     });
-    remoteAudios.current.forEach((audio) => { audio.muted = flags.deafened; });
+    if (micGraphRef.current) {
+      micGraphRef.current.gain.gain.value = flags.muted ? 0 : audioSettingsRef.current.micLevel / 100;
+    }
+    applyOutput();
+  }
+
+  function releaseMicGraph() {
+    const graph = micGraphRef.current;
+    if (!graph) return;
+    micGraphRef.current = null;
+    try { graph.source.disconnect(); } catch { /* already stopped */ }
+    graph.rawStream.getTracks().forEach((track) => track.stop());
+    try { graph.processed.stop(); } catch { /* already stopped */ }
+  }
+
+  function attachMicGraph(rawStream) {
+    const previous = micGraphRef.current;
+    const ctx = ensureContext();
+    const source = ctx.createMediaStreamSource(rawStream);
+    const gain = ctx.createGain();
+    gain.gain.value = audioSettingsRef.current.micLevel / 100;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    const destination = ctx.createMediaStreamDestination();
+    source.connect(gain);
+    source.connect(analyser);
+    gain.connect(destination);
+    const processed = destination.stream.getAudioTracks()[0];
+    micGraphRef.current = { rawStream, source, gain, analyser, processed };
+    rtcRef.current.setMicTrack(processed);
+    rtcRef.current.localStream = rawStream;
+    applyMic(rawStream);
+    if (previous && previous !== micGraphRef.current) {
+      try { previous.source.disconnect(); } catch { /* already stopped */ }
+      previous.rawStream.getTracks().forEach((track) => track.stop());
+      try { previous.processed.stop(); } catch { /* already stopped */ }
+    }
+    return rawStream;
   }
 
   function unlockAudio() {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (Ctx && !audioCtxRef.current) audioCtxRef.current = new Ctx();
-    audioCtxRef.current?.resume().catch(() => {});
+    ensureContext();
     const audio = new Audio(SILENT_WAV);
     audio.muted = true;
     audio.play().catch(() => {});
   }
 
+  function ensureContext() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx && !audioCtxRef.current) audioCtxRef.current = new Ctx();
+    audioCtxRef.current?.resume().catch(() => {});
+    return audioCtxRef.current;
+  }
+
+  async function captureMic(deviceId) {
+    const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    if (deviceId) audio.deviceId = { exact: deviceId };
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio, video: false });
+    } catch (err) {
+      if (!deviceId) throw err;
+      return navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+    }
+  }
+
   async function ensureMic() {
-    const current = rtcRef.current?.localStream;
+    const current = micGraphRef.current?.rawStream;
     if (current?.getAudioTracks().some((track) => track.readyState === 'live')) {
       applyMic(current);
       return current;
@@ -191,13 +317,8 @@ export default function VoiceApp() {
       return null;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: false,
-      });
-      rtcRef.current.setLocalStream(stream);
-      rtcRef.current.localStream = stream;
-      applyMic(stream);
+      const stream = await captureMic(audioSettingsRef.current.micId);
+      attachMicGraph(stream);
       setMicError('');
       return stream;
     } catch (err) {
@@ -259,10 +380,10 @@ export default function VoiceApp() {
     applyParticipants([]);
     setScreenTrack(null);
     if (prev) await emitAck('room:leave');
-    if (!keepMic && rtcRef.current.localStream) {
-      rtcRef.current.localStream.getTracks().forEach((track) => track.stop());
+    if (!keepMic) {
+      releaseMicGraph();
+      rtcRef.current.setMicTrack(null);
       rtcRef.current.localStream = null;
-      rtcRef.current.setLocalStream(null);
     }
   }
 
@@ -371,22 +492,81 @@ export default function VoiceApp() {
 
   function toggleMute() {
     if (!roomRef.current) return;
-    const current = meRef.current;
-    const next = current.deafened && current.muted
-      ? patchMe({ deafened: false, muted: false })
-      : patchMe({ muted: !current.muted });
-    applyMic(rtcRef.current.localStream, next);
+    const next = patchMe({ muted: !meRef.current.muted });
+    applyMic(micGraphRef.current?.rawStream, next);
     pushState(next);
   }
 
   function toggleDeafen() {
     if (!roomRef.current) return;
-    const current = meRef.current;
-    const next = current.deafened
-      ? patchMe({ deafened: false, muted: Boolean(current.muteBeforeDeafen) })
-      : patchMe({ deafened: true, muted: true, muteBeforeDeafen: current.muted });
-    applyMic(rtcRef.current.localStream, next);
+    const next = patchMe({ deafened: !meRef.current.deafened });
+    applyOutput();
     pushState(next);
+  }
+
+  function saveAudio(partial) {
+    const next = { ...audioSettingsRef.current, ...partial };
+    audioSettingsRef.current = next;
+    setAudioSettings(next);
+    storeAudio(next);
+    return next;
+  }
+
+  async function refreshDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    const list = await navigator.mediaDevices.enumerateDevices();
+    setMics(list.filter((device) => device.kind === 'audioinput'));
+    setSpeakers(list.filter((device) => device.kind === 'audiooutput'));
+  }
+
+  async function openSettings() {
+    unlockAudio();
+    settingsOpenRef.current = true;
+    setSettingsOpen(true);
+    await ensureMic();
+    await refreshDevices();
+  }
+
+  async function chooseMic(deviceId) {
+    saveAudio({ micId: deviceId });
+    if (!micGraphRef.current && !roomRef.current) return;
+    try {
+      const stream = await captureMic(deviceId);
+      attachMicGraph(stream);
+      setMicError('');
+      await refreshDevices();
+    } catch {
+      showToast('선택한 마이크로 바꾸지 못했어요.');
+    }
+  }
+
+  function chooseSpeaker(deviceId) {
+    saveAudio({ speakerId: deviceId });
+    applyOutput();
+  }
+
+  function changeMicLevel(value) {
+    saveAudio({ micLevel: clampLevel(value, 0, 200, 100) });
+    applyMic(micGraphRef.current?.rawStream);
+  }
+
+  function changeSpeakerLevel(value) {
+    saveAudio({ speakerLevel: clampLevel(value, 0, 100, 100) });
+    applyOutput();
+  }
+
+  function testSpeaker() {
+    unlockAudio();
+    if (audioSettingsRef.current.speakerLevel <= 0) {
+      showToast('스피커 크기가 0이라 소리가 나지 않아요.');
+      return;
+    }
+    const audio = new Audio('/sounds/join.mp3');
+    audio.volume = audioSettingsRef.current.speakerLevel / 100;
+    const start = () => audio.play().catch(() => showToast('스피커 테스트를 재생하지 못했어요.'));
+    if (audioSettingsRef.current.speakerId && typeof audio.setSinkId === 'function') {
+      audio.setSinkId(audioSettingsRef.current.speakerId).then(start).catch(start);
+    } else start();
   }
 
   function clearPeerMedia(peerId) {
@@ -410,8 +590,13 @@ export default function VoiceApp() {
         if (track.kind === 'audio') {
           const audio = new Audio();
           audio.autoplay = true;
+          audio.dataset.peer = peerId;
           audio.srcObject = new MediaStream([track]);
-          audio.muted = meRef.current.deafened;
+          audio.volume = outputVolume();
+          audio.muted = audio.volume <= 0;
+          if (audioSettingsRef.current.speakerId && typeof audio.setSinkId === 'function') {
+            audio.setSinkId(audioSettingsRef.current.speakerId).catch(() => {});
+          }
           audio.play().catch(() => {});
           remoteAudios.current.push(audio);
           track.addEventListener('ended', () => {
@@ -494,8 +679,11 @@ export default function VoiceApp() {
       }
     };
     document.addEventListener('keydown', onKey);
+    const onDevices = () => refreshDevices();
+    navigator.mediaDevices?.addEventListener('devicechange', onDevices);
     return () => {
       document.removeEventListener('keydown', onKey);
+      navigator.mediaDevices?.removeEventListener('devicechange', onDevices);
       socket.disconnect();
     };
     // Mount once. Handlers read the latest values through refs.
@@ -520,6 +708,65 @@ export default function VoiceApp() {
     if (passwordRoom && !dialog.open) dialog.showModal();
     if (!passwordRoom && dialog.open) dialog.close();
   }, [passwordRoom]);
+
+  useEffect(() => {
+    settingsOpenRef.current = settingsOpen;
+    const dialog = settingsDialog.current;
+    if (!dialog) return;
+    if (settingsOpen && !dialog.open) dialog.showModal();
+    if (!settingsOpen && dialog.open) dialog.close();
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    let frame = 0;
+    let last = 0;
+    const tick = (now) => {
+      frame = window.requestAnimationFrame(tick);
+      if (now - last < 80) return;
+      last = now;
+      const next = {};
+      const graph = micGraphRef.current;
+      const selfId = socketRef.current?.id;
+      if (graph && selfId && !meRef.current.muted && roomRef.current) {
+        const level = levelOf(graph.analyser);
+        next[selfId] = level > 0.05;
+        if (settingsOpenRef.current) {
+          const meter = Math.min(100, Math.round(level * 420));
+          setMicMeter((prev) => (Math.abs(prev - meter) > 3 ? meter : prev));
+        }
+      } else if (settingsOpenRef.current) {
+        setMicMeter(0);
+      }
+      const ctx = audioCtxRef.current;
+      remoteAudios.current.forEach((audio) => {
+        const id = audio.dataset.peer;
+        if (!id || !audio.srcObject || !ctx) return;
+        if (!audio.dataset.analysed) {
+          try {
+            const source = ctx.createMediaStreamSource(audio.srcObject);
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 512;
+            source.connect(analyser);
+            audio.dataset.analysed = '1';
+            audio._analyser = analyser;
+          } catch { /* stream already connected */ }
+        }
+        if (audio._analyser) next[id] = levelOf(audio._analyser) > 0.05;
+      });
+      const prev = speakingRef.current;
+      const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+      let changed = false;
+      for (const key of keys) {
+        if (Boolean(prev[key]) !== Boolean(next[key])) changed = true;
+      }
+      if (changed) {
+        speakingRef.current = next;
+        setSpeaking(next);
+      }
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   const tiles = useMemo(() => {
     const list = [];
@@ -561,10 +808,10 @@ export default function VoiceApp() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="logo" aria-hidden="true" />
+          <span className="logo" aria-hidden="true">M</span>
           <div>
+            <p className="brand-kicker">EST. SEOUL</p>
             <strong>모임실</strong>
-            <p>로그인 없는 보이스 채팅</p>
           </div>
         </div>
         <label className="nick-field">
@@ -588,6 +835,7 @@ export default function VoiceApp() {
           />
         </label>
         <p className="nick-help">이 별명으로 보여요. 계정은 필요 없어요.</p>
+        <button className="btn secondary block" type="button" onClick={openSettings}>소리 설정</button>
         <div className="side-head">
           <h2>열린 방</h2>
           <span>{rooms.length}</span>
@@ -689,16 +937,16 @@ export default function VoiceApp() {
             <div className="members">
               {participants.map((person) => {
                 const self = person.id === socketId;
-                const view = self ? { ...person, nickname: cleanName(nickname, 16) || person.nickname, muted: me.muted || me.deafened, deafened: me.deafened, sharing: me.sharing } : person;
+                const view = self ? { ...person, nickname: cleanName(nickname, 16) || person.nickname, muted: me.muted, deafened: me.deafened, sharing: me.sharing } : person;
                 const color = hue(view.nickname);
                 const status = self ? '' : (connLabel[conn[person.id]] || '');
                 return (
-                  <article key={person.id} className="member">
+                  <article key={person.id} className={`member${speaking[person.id] ? ' speaking' : ''}`}>
                     <div className="avatar" style={{ background: `linear-gradient(160deg, hsl(${color} 85% 62%), hsl(${(color + 36) % 360} 70% 42%))` }}>{initial(view.nickname)}</div>
                     <strong className="member-name">{view.nickname}{self ? <span className="me-badge">나</span> : null}</strong>
                     {status ? <span className="member-status">{status}</span> : null}
                     <div className="flags">
-                      {view.muted || view.deafened ? <Icon name="micOff" /> : null}
+                      {view.muted ? <Icon name="micOff" /> : null}
                       {view.deafened ? <Icon name="headphonesOff" /> : null}
                       {view.sharing ? <Icon name="screen" /> : null}
                     </div>
@@ -708,13 +956,17 @@ export default function VoiceApp() {
             </div>
             <footer className="dock">
               <div className="controls">
-                <button className={`ctrl${me.muted || me.deafened ? ' is-danger' : ''}`} type="button" onClick={toggleMute}>
-                  <Icon name={me.muted || me.deafened ? 'micOff' : 'mic'} />
-                  <span className="ctrl-label">{me.muted || me.deafened ? '마이크 꺼짐' : '마이크 켜짐'}</span>
+                <button className={`ctrl${me.muted ? ' is-danger' : ''}`} type="button" onClick={toggleMute}>
+                  <Icon name={me.muted ? 'micOff' : 'mic'} />
+                  <span className="ctrl-label">{me.muted ? '마이크 꺼짐' : '마이크 켜짐'}</span>
                 </button>
                 <button className={`ctrl${me.deafened ? ' is-danger' : ''}`} type="button" onClick={toggleDeafen}>
                   <Icon name={me.deafened ? 'headphonesOff' : 'headphones'} />
                   <span className="ctrl-label">{me.deafened ? '소리 꺼짐' : '소리 켜짐'}</span>
+                </button>
+                <button className="ctrl" type="button" onClick={openSettings}>
+                  <Icon name="gear" />
+                  <span className="ctrl-label">설정</span>
                 </button>
                 <button className={`ctrl${me.sharing ? ' is-live' : ''}`} type="button" onClick={toggleScreen}>
                   <Icon name="screen" />
@@ -725,7 +977,7 @@ export default function VoiceApp() {
                   <span className="ctrl-label">나가기</span>
                 </button>
               </div>
-              <p className="hint">M 키로 마이크를 껐다 켤 수 있어요. 에코가 들리면 헤드폰을 써 주세요.</p>
+              <p className="hint">M 키는 마이크만 껐다 켭니다. 소리 끄기는 듣기만 막고, 내 목소리는 그대로 나갑니다.</p>
             </footer>
           </section>
         )}
@@ -781,6 +1033,46 @@ export default function VoiceApp() {
             <button className="btn" type="submit">입장</button>
           </div>
         </form>
+      </dialog>
+
+      <dialog ref={settingsDialog} onClose={() => { settingsOpenRef.current = false; setSettingsOpen(false); }}>
+        <div className="modal">
+          <h2>소리 설정</h2>
+          <p className="modal-copy">연결해서 쓰고 있는 마이크와 스피커를 고르고, 크기와 테스트를 할 수 있어요.</p>
+          <label>
+            <span>마이크</span>
+            <select value={audioSettings.micId} onChange={(event) => chooseMic(event.target.value)}>
+              <option value="">기본 마이크</option>
+              {mics.map((device, index) => (
+                <option key={device.deviceId || index} value={device.deviceId}>{device.label || `마이크 ${index + 1}`}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>마이크 크기 {audioSettings.micLevel}%</span>
+            <input type="range" min="0" max="200" value={audioSettings.micLevel} onChange={(event) => changeMicLevel(event.target.value)} />
+          </label>
+          <div className="meter" aria-hidden="true"><span style={{ width: `${micMeter}%` }} /></div>
+          <p className="meter-label">말하면 막대가 움직여요. 이게 마이크 테스트예요.</p>
+          <label>
+            <span>스피커</span>
+            <select value={audioSettings.speakerId} onChange={(event) => chooseSpeaker(event.target.value)}>
+              <option value="">기본 스피커</option>
+              {speakers.map((device, index) => (
+                <option key={device.deviceId || index} value={device.deviceId}>{device.label || `스피커 ${index + 1}`}</option>
+              ))}
+            </select>
+          </label>
+          {speakers.length === 0 ? <p className="meter-label">이 브라우저는 스피커 목록을 보여주지 않을 수 있어요. Chrome에서는 목록이 나와요.</p> : null}
+          <label>
+            <span>스피커 크기 {audioSettings.speakerLevel}%</span>
+            <input type="range" min="0" max="100" value={audioSettings.speakerLevel} onChange={(event) => changeSpeakerLevel(event.target.value)} />
+          </label>
+          <div className="modal-actions">
+            <button className="btn secondary" type="button" onClick={testSpeaker}>스피커 테스트</button>
+            <button className="btn" type="button" onClick={() => setSettingsOpen(false)}>닫기</button>
+          </div>
+        </div>
       </dialog>
     </div>
   );
