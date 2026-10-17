@@ -146,12 +146,19 @@ export default function VoiceApp() {
   const settingsOpenRef = useRef(false);
   const speakingRef = useRef({});
   const settingsDialog = useRef(null);
+  const roomMetaRef = useRef(null);
+  const returnRoomRef = useRef(null);
+  const passwordsRef = useRef(new Map());
+  const directoryOpenRef = useRef(false);
   const [audioSettings, setAudioSettings] = useState(audioSettingsRef.current);
   const [mics, setMics] = useState([]);
   const [speakers, setSpeakers] = useState([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [micMeter, setMicMeter] = useState(0);
   const [speaking, setSpeaking] = useState({});
+  const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [roomQuery, setRoomQuery] = useState('');
+  const [returnRoom, setReturnRoom] = useState(null);
 
   function showToast(message) {
     setToast(message);
@@ -353,6 +360,7 @@ export default function VoiceApp() {
 
   function enterRoom(nextRoom) {
     roomRef.current = nextRoom.id;
+    roomMetaRef.current = nextRoom;
     rtcRef.current.setRoom(nextRoom.id);
     rtcRef.current.setMediaReady(true);
     setRoom(nextRoom);
@@ -364,10 +372,43 @@ export default function VoiceApp() {
     window.history.replaceState(null, '', `${url.pathname}?room=${nextRoom.id}`);
   }
 
-  async function leaveRoom({ keepMic = false } = {}) {
-    const url = new URL(window.location.href);
-    url.searchParams.delete('room');
-    window.history.replaceState(null, '', url.pathname);
+  function closeDirectory() {
+    directoryOpenRef.current = false;
+    setDirectoryOpen(false);
+  }
+
+  function openDirectory() {
+    if (roomRef.current) {
+      directoryOpenRef.current = true;
+      setDirectoryOpen(true);
+      return;
+    }
+    document.getElementById('room-search')?.focus();
+  }
+
+  function pinReturnRoom() {
+    const id = roomRef.current;
+    if (!id || returnRoomRef.current) return;
+    const anchor = {
+      id,
+      name: roomMetaRef.current?.name || '원래 방',
+      password: passwordsRef.current.get(id) || '',
+    };
+    returnRoomRef.current = anchor;
+    setReturnRoom(anchor);
+  }
+
+  function clearReturnRoom() {
+    returnRoomRef.current = null;
+    setReturnRoom(null);
+  }
+
+  async function leaveRoom({ keepMic = false, notify = true, keepView = false } = {}) {
+    if (!keepView) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('room');
+      window.history.replaceState(null, '', url.pathname);
+    }
     stopShare();
     rtcRef.current.closeAll();
     remoteVideos.current.clear();
@@ -376,10 +417,15 @@ export default function VoiceApp() {
     const prev = roomRef.current;
     roomRef.current = null;
     rtcRef.current.setRoom(null);
-    setRoom(null);
-    applyParticipants([]);
+    if (!keepView) {
+      roomMetaRef.current = null;
+      setRoom(null);
+      applyParticipants([]);
+      clearReturnRoom();
+      closeDirectory();
+    }
     setScreenTrack(null);
-    if (prev) await emitAck('room:leave');
+    if (prev && notify) await emitAck('room:leave');
     if (!keepMic) {
       releaseMicGraph();
       rtcRef.current.setMicTrack(null);
@@ -396,15 +442,20 @@ export default function VoiceApp() {
       unlockAudio();
       const stream = await ensureMic();
       applyMic(stream);
-      if (roomRef.current) await leaveRoom({ keepMic: true });
-      const res = await emitAck('room:create', { name, password, nickname: nick });
+      const res = await emitAck('room:create', { name, password, nickname: nick, holdPrevious: Boolean(roomRef.current) });
       if (!res.ok) {
         showToast(res.message || '방을 만들지 못했어요.');
         return;
       }
+      if (roomRef.current) {
+        pinReturnRoom();
+        await leaveRoom({ keepMic: true, notify: false, keepView: true });
+      }
+      passwordsRef.current.set(res.room.id, String(password || ''));
       enterRoom(res.room);
       pushState();
       setCreateOpen(false);
+      closeDirectory();
     } finally {
       busyRef.current = false;
     }
@@ -419,14 +470,22 @@ export default function VoiceApp() {
       unlockAudio();
       const stream = await ensureMic();
       applyMic(stream);
-      if (roomRef.current && roomRef.current !== roomId) await leaveRoom({ keepMic: true });
-      const res = await emitAck('room:join', { roomId, password, nickname: nick });
+      const switching = Boolean(roomRef.current && roomRef.current !== roomId);
+      const returning = returnRoomRef.current?.id === roomId;
+      const res = await emitAck('room:join', { roomId, password, nickname: nick, holdPrevious: switching });
       if (!res.ok) {
         showToast(res.message || '방에 들어가지 못했어요.');
         return;
       }
+      if (switching) {
+        if (!returning) pinReturnRoom();
+        await leaveRoom({ keepMic: true, notify: false, keepView: true });
+      }
+      passwordsRef.current.set(roomId, String(password || ''));
       enterRoom(res.room);
+      if (returning) clearReturnRoom();
       pushState();
+      closeDirectory();
     } finally {
       busyRef.current = false;
     }
@@ -435,11 +494,28 @@ export default function VoiceApp() {
   function requestJoin(target) {
     if (!target || target.id === roomRef.current) return;
     unlockAudio();
-    if (!target.hasPassword) {
-      joinRoom(target.id, '');
+    const saved = passwordsRef.current.get(target.id);
+    if (!target.hasPassword || saved) {
+      joinRoom(target.id, saved || '');
       return;
     }
     setPasswordRoom(target);
+  }
+
+  function returnToOriginal() {
+    const target = returnRoomRef.current;
+    if (!target) return;
+    const live = rooms.find((item) => item.id === target.id);
+    if (!live) {
+      showToast('원래 방이 이미 닫혀 있어요.');
+      clearReturnRoom();
+      return;
+    }
+    if (live.participants.length >= maxMembers) {
+      showToast('원래 방이 가득 찼어요.');
+      return;
+    }
+    joinRoom(target.id, target.password || '');
   }
 
   function stopShare() {
@@ -641,9 +717,12 @@ export default function VoiceApp() {
         rtc.closeAll();
         remoteVideos.current.clear();
         roomRef.current = null;
+        roomMetaRef.current = null;
         setRoom(null);
         applyParticipants([]);
         setScreenTrack(null);
+        clearReturnRoom();
+        closeDirectory();
         showToast('연결이 끊어져 방에서 나왔어요.');
       }
     });
@@ -662,6 +741,7 @@ export default function VoiceApp() {
     });
     socket.on('room:state', (next) => {
       if (!next || next.id !== roomRef.current) return;
+      roomMetaRef.current = next;
       setRoom(next);
       applyParticipants(next.participants);
       rtc.sync(next.participants.map((person) => person.id));
@@ -672,7 +752,12 @@ export default function VoiceApp() {
     socket.on('signal', (message) => rtc.handleSignal(message));
 
     const onKey = (event) => {
-      if (event.target.matches('input, textarea')) return;
+      if (event.key === 'Escape' && directoryOpenRef.current) {
+        directoryOpenRef.current = false;
+        setDirectoryOpen(false);
+        return;
+      }
+      if (event.target.matches('input, textarea, select')) return;
       if ((event.key === 'm' || event.key === 'M') && roomRef.current) {
         event.preventDefault();
         toggleMute();
@@ -694,6 +779,12 @@ export default function VoiceApp() {
     document.body.dataset.view = room ? 'call' : 'lobby';
     document.body.dataset.online = online ? '1' : '0';
   }, [room, online]);
+
+  useEffect(() => {
+    if (!directoryOpen) return undefined;
+    document.getElementById('room-search')?.focus();
+    return undefined;
+  }, [directoryOpen]);
 
   useEffect(() => {
     const dialog = createDialog.current;
@@ -804,6 +895,73 @@ export default function VoiceApp() {
     checking: '연결 중',
   };
 
+  const query = roomQuery.trim().toLowerCase();
+  const visibleRooms = rooms.filter((item) => {
+    if (!query) return true;
+    if (item.name.toLowerCase().includes(query)) return true;
+    return item.participants.some((person) => person.nickname.toLowerCase().includes(query));
+  });
+  const canReturn = Boolean(returnRoom && returnRoom.id !== room?.id);
+
+  function renderDirectory(overlay) {
+    return (
+      <section className={overlay ? 'directory directory-overlay' : 'directory'} aria-label="열린 방">
+        <div className="directory-head">
+          <div>
+            <p className="eyebrow">{overlay ? '머무른 채로 둘러보기' : '한눈에 보기'}</p>
+            <h2>열린 방</h2>
+          </div>
+          <div className="directory-actions">
+            {canReturn ? <button className="btn secondary" type="button" onClick={returnToOriginal}>원래 방으로</button> : null}
+            {overlay ? <button className="btn secondary" type="button" onClick={closeDirectory}>대화로 돌아가기</button> : null}
+          </div>
+        </div>
+        <label className="directory-search">
+          <span>검색</span>
+          <input
+            id="room-search"
+            value={roomQuery}
+            onChange={(event) => setRoomQuery(event.target.value)}
+            placeholder="방 이름이나 참여자"
+          />
+        </label>
+        <p className="directory-count">{rooms.length === 0 ? '아직 열린 방이 없어요' : `${visibleRooms.length}개 표시`}</p>
+        {rooms.length === 0 ? (
+          <div className="empty">
+            <div className="empty-mark" aria-hidden="true" />
+            <h2>아직 열린 방이 없어요</h2>
+            <p>첫 방을 만들면 이 목록에서 바로 찾을 수 있어요.</p>
+            <button className="btn" type="button" onClick={() => setCreateOpen(true)}>방 만들기</button>
+          </div>
+        ) : visibleRooms.length === 0 ? (
+          <p className="directory-empty">찾는 방이 없어요.</p>
+        ) : (
+          <div className="directory-list">
+            {visibleRooms.map((item) => {
+              const here = item.id === room?.id;
+              const full = item.participants.length >= maxMembers && !here;
+              return (
+                <article key={item.id} className={`directory-row${here ? ' here' : ''}`}>
+                  <div>
+                    <h3>{item.name}</h3>
+                    <p className="who">{item.participants.length}/{maxMembers}명 · {formatWho(item.participants)}</p>
+                  </div>
+                  <div className="directory-meta">
+                    {item.hasPassword ? <span className="lock-pill" title="비밀번호 방"><Icon name="lock" /></span> : null}
+                    <span className="count-pill">{item.participants.length}</span>
+                    <button className="btn" type="button" disabled={full || here} onClick={() => requestJoin(item)}>
+                      {here ? '지금 여기' : full ? '가득 참' : '입장'}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    );
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -836,6 +994,7 @@ export default function VoiceApp() {
         </label>
         <p className="nick-help">이 별명으로 보여요. 계정은 필요 없어요.</p>
         <button className="btn secondary block" type="button" onClick={openSettings}>소리 설정</button>
+        <button className="btn secondary block" type="button" onClick={openDirectory}>방 찾기</button>
         <div className="side-head">
           <h2>열린 방</h2>
           <span>{rooms.length}</span>
@@ -878,36 +1037,7 @@ export default function VoiceApp() {
               <h1>누가 말하는지 보이는<br />가벼운 보이스 채팅</h1>
               <p className="lede">방을 만들거나 열려 있는 방에 들어가 목소리로 이야기하고, 화면을 공유할 수 있어요. 비밀번호를 걸면 그 방을 잠글 수 있고, 누가 들어와 있는지는 목록에서 보여요.</p>
             </div>
-            {rooms.length === 0 ? (
-              <div className="empty">
-                <div className="empty-mark" aria-hidden="true" />
-                <h2>아직 열린 방이 없어요</h2>
-                <p>첫 방을 만들면 다른 사람도 이 목록에서 바로 볼 수 있어요.</p>
-                <button className="btn" type="button" onClick={() => setCreateOpen(true)}>방 만들기</button>
-              </div>
-            ) : (
-              <div className="room-grid">
-                {rooms.map((item) => {
-                  const full = item.participants.length >= maxMembers && item.id !== room?.id;
-                  return (
-                    <article key={item.id} className="room-card">
-                      <div className="card-top">
-                        <h3>{item.name}</h3>
-                        <span style={{ display: 'flex', gap: 6 }}>
-                          {item.hasPassword ? <span className="lock-pill" title="비밀번호 방"><Icon name="lock" /></span> : null}
-                          <span className="count-pill">{item.participants.length}</span>
-                        </span>
-                      </div>
-                      <p className="who">{item.participants.length}/{maxMembers}명 참여 중</p>
-                      <p className="who">{formatWho(item.participants)}</p>
-                      <button className="btn" type="button" disabled={full} onClick={() => requestJoin(item)}>
-                        {item.id === room?.id ? '참여 중' : full ? '가득 참' : '입장'}
-                      </button>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
+            {renderDirectory(false)}
           </section>
         ) : (
           <section id="call" className={tiles.length && !stageCollapsed ? 'has-stage' : ''}>
@@ -917,7 +1047,14 @@ export default function VoiceApp() {
                 <h1>{room.name}</h1>
                 <p className="lede">{participants.length}명 참여 중 · 최대 {maxMembers}명</p>
               </div>
+              <button className="btn secondary" type="button" onClick={openDirectory}>열린 방</button>
             </header>
+            {canReturn ? (
+              <div className="return-bar">
+                <span>원래 방 · {returnRoom.name}</span>
+                <button type="button" onClick={returnToOriginal}>돌아가기</button>
+              </div>
+            ) : null}
             {micError ? <p className="banner">{micError}</p> : null}
             {tiles.length ? (
               <div className="stage-bar">
@@ -981,6 +1118,7 @@ export default function VoiceApp() {
             </footer>
           </section>
         )}
+        {room && directoryOpen ? renderDirectory(true) : null}
       </main>
 
       {toast ? <div className="toast" role="status">{toast}</div> : null}
