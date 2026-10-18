@@ -966,10 +966,10 @@ export default function VoiceApp() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="logo" aria-hidden="true">M</span>
+          <span className="logo" aria-hidden="true" />
           <div>
-            <p className="brand-kicker">EST. SEOUL</p>
             <strong>모임실</strong>
+            <p>로그인 없는 보이스 채팅</p>
           </div>
         </div>
         <label className="nick-field">
