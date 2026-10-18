@@ -53,17 +53,31 @@ h1, h2, p { margin: 0; }
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 0;
   min-height: 0;
-  padding: 22px 18px;
+  padding: 28px 22px 22px;
   background: var(--panel);
   border-right: 1px solid var(--line);
   backdrop-filter: blur(16px);
 }
-.brand { display: flex; gap: 12px; align-items: center; }
-.brand strong { display: block; font-size: 20px; letter-spacing: -0.03em; }
+.side-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 22px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+.side-rooms { flex: 1; min-height: 0; }
+.brand { display: flex; gap: 14px; align-items: center; }
+.brand strong { display: block; font-size: 22px; font-weight: 750; letter-spacing: -0.03em; }
 .brand p, .nick-help, .hint, .modal-copy, .lede { color: var(--muted); }
-.brand p, .nick-help { font-size: 13px; }
+.brand p, .nick-help { font-size: 13px; line-height: 1.55; }
+.nick-field span, .directory-search span, .side-head h2 {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
 .logo {
   width: 42px;
   height: 42px;
@@ -112,9 +126,7 @@ input[type="range"] {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 6px;
 }
-.side-head h2 { font-size: 14px; }
 .side-head span, .count-pill, .lock-pill {
   min-width: 22px;
   padding: 2px 8px;
@@ -196,7 +208,13 @@ input[type="range"] {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  padding: 28px;
+  padding: 40px 48px 36px;
+}
+#lobby {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+  max-width: 1040px;
 }
 .banner {
   margin: 0 0 16px;
@@ -209,20 +227,31 @@ input[type="range"] {
   background: rgba(255, 93, 115, 0.12);
   color: #ffc1cb;
 }
-.hero { max-width: 760px; margin-bottom: 28px; }
+.hero {
+  max-width: 720px;
+  margin: 0;
+  padding: 4px 2px 36px;
+  border-bottom: 1px solid var(--line);
+}
 .eyebrow {
   color: var(--accent-2);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  margin-bottom: 8px;
+  letter-spacing: 0.08em;
+  margin-bottom: 16px;
 }
 .hero h1, .call-head h1 {
-  font-size: clamp(32px, 4vw, 52px);
-  line-height: 1.2;
-  letter-spacing: -0.045em;
+  font-size: clamp(36px, 4vw, 52px);
+  font-weight: 750;
+  line-height: 1.22;
+  letter-spacing: -0.04em;
 }
-.hero .lede, .call-head .lede { margin-top: 12px; max-width: 640px; line-height: 1.6; }
+.hero .lede, .call-head .lede {
+  margin-top: 20px;
+  max-width: 560px;
+  font-size: 16px;
+  line-height: 1.75;
+}
 .room-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -246,8 +275,8 @@ input[type="range"] {
   border: 1px dashed var(--line);
   background: rgba(255, 255, 255, 0.03);
 }
-.empty h2 { margin: 12px 0 8px; letter-spacing: -0.03em; }
-.empty p { color: var(--muted); margin-bottom: 16px; }
+.empty h2 { margin: 14px 0 8px; font-size: 22px; font-weight: 700; letter-spacing: -0.03em; }
+.empty p { color: var(--muted); margin-bottom: 18px; font-size: 14px; line-height: 1.65; }
 .empty-mark {
   width: 54px;
   height: 54px;
@@ -300,30 +329,32 @@ input[type="range"] {
   flex-wrap: wrap;
 }
 .directory h2 {
-  font-size: clamp(28px, 3vw, 40px);
-  letter-spacing: -0.04em;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.3;
 }
 .directory-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.directory-search { max-width: 420px; margin-top: 16px; }
-.directory-count { margin: 12px 0 14px; color: var(--muted); font-size: 13px; }
-.directory-empty { color: var(--muted); margin-bottom: 12px; }
+.directory-search { max-width: 420px; margin-top: 22px; }
+.directory-count { margin: 20px 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.directory-empty { color: var(--muted); margin: 8px 0 16px; font-size: 15px; }
 .directory-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 18px;
 }
 .directory-row {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-height: 168px;
-  padding: 16px;
+  gap: 14px;
+  min-height: 176px;
+  padding: 20px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.03);
 }
-.directory-row h3 { font-size: 18px; letter-spacing: -0.03em; }
-.directory-row .who { white-space: normal; }
+.directory-row h3 { font-size: 20px; font-weight: 700; letter-spacing: -0.03em; }
+.directory-row .who { white-space: normal; font-size: 13px; line-height: 1.55; }
 .directory-row.here {
   border-color: rgba(124, 92, 255, 0.55);
   background: rgba(124, 92, 255, 0.12);
@@ -529,9 +560,12 @@ dialog::backdrop {
     border-bottom: 1px solid var(--line);
   }
   .room-list { max-height: 280px; flex: none; }
-  .main { overflow: visible; padding: 18px; }
+  .main { overflow: visible; padding: 24px 18px 32px; }
+  #lobby { gap: 28px; }
   #call { min-height: auto; }
-  .hero h1 { font-size: 34px; }
+  .hero { padding-bottom: 28px; }
+  .hero h1 { font-size: 32px; }
+  .directory h2 { font-size: 22px; }
   .call-head { align-items: flex-start; flex-direction: column; }
   .directory-overlay { padding: 0; }
   body[data-view="call"] .room-list,

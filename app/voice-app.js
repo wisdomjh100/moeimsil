@@ -908,7 +908,7 @@ export default function VoiceApp() {
       <section className={overlay ? 'directory directory-overlay' : 'directory'} aria-label="열린 방">
         <div className="directory-head">
           <div>
-            <p className="eyebrow">{overlay ? '머무른 채로 둘러보기' : '한눈에 보기'}</p>
+            {overlay ? <p className="eyebrow">머무른 채로 둘러보기</p> : null}
             <h2>열린 방</h2>
           </div>
           <div className="directory-actions">
@@ -972,6 +972,7 @@ export default function VoiceApp() {
             <p>로그인 없는 보이스 채팅</p>
           </div>
         </div>
+        <div className="side-section">
         <label className="nick-field">
           <span>내 별명</span>
           <input
@@ -993,8 +994,12 @@ export default function VoiceApp() {
           />
         </label>
         <p className="nick-help">이 별명으로 보여요. 계정은 필요 없어요.</p>
+        </div>
+        <div className="side-section">
         <button className="btn secondary block" type="button" onClick={openSettings}>소리 설정</button>
         <button className="btn secondary block" type="button" onClick={openDirectory}>방 찾기</button>
+        </div>
+        <div className="side-section side-rooms">
         <div className="side-head">
           <h2>열린 방</h2>
           <span>{rooms.length}</span>
@@ -1024,6 +1029,7 @@ export default function VoiceApp() {
         </div>
         {rooms.length === 0 ? <p className="side-empty">아직 열린 방이 없어요.</p> : null}
         <button id="open-create" className="btn block" type="button" onClick={() => setCreateOpen(true)}>방 만들기</button>
+        </div>
       </aside>
 
       <main className="main">
