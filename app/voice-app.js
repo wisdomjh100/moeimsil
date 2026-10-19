@@ -6,6 +6,7 @@ import { createRtcSession } from './webrtc';
 
 const NICK_KEY = 'moeim-nickname';
 const AUDIO_KEY = 'moeim-audio';
+const PEER_KEY = 'moeim-peer-levels';
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 
 function cleanName(value, max) {
@@ -56,6 +57,25 @@ function storeAudio(value) {
   try { localStorage.setItem(AUDIO_KEY, JSON.stringify(value)); } catch { /* private mode */ }
 }
 
+function loadPeerStore() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PEER_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object') return {};
+    const stored = {};
+    for (const [name, level] of Object.entries(parsed)) {
+      const nick = cleanName(name, 16);
+      if (nick) stored[nick] = clampLevel(level, 0, 100, 100);
+    }
+    return stored;
+  } catch {
+    return {};
+  }
+}
+
+function storePeerStore(value) {
+  try { localStorage.setItem(PEER_KEY, JSON.stringify(value)); } catch { /* private mode */ }
+}
+
 function clampLevel(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
@@ -83,9 +103,75 @@ function Icon({ name }) {
     leave: '<path d="M10 7V5H5v14h5v-2"/><path d="M10 12h9"/><path d="M16 9l3 3-3 3"/>',
     lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M18 6l-1.6 1.6M7.6 16.4 6 18"/>',
+    volume: '<path d="M4 10v4h3.2L12 18V6L7.2 10H4z"/><path d="M15.2 9.2a4 4 0 0 1 0 5.6"/><path d="M17.4 7a7 7 0 0 1 0 10"/>',
+    volumeOff: '<path d="M4 10v4h3.2L12 18V6L7.2 10H4z"/><path d="M16 10l5 5"/><path d="M21 10l-5 5"/>',
   };
   return (
     <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" dangerouslySetInnerHTML={{ __html: paths[name] }} />
+  );
+}
+
+function VolumeKnob({ value, name, onChange }) {
+  const dial = useRef(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  function levelFromEvent(event) {
+    const rect = dial.current.getBoundingClientRect();
+    const dx = event.clientX - (rect.left + rect.width / 2);
+    const dy = event.clientY - (rect.top + rect.height / 2);
+    const deg = Math.atan2(dx, -dy) * (180 / Math.PI);
+    if (deg < -140 || deg > 140) return valueRef.current < 50 ? 0 : 100;
+    return Math.round(((deg + 140) / 280) * 100);
+  }
+
+  function onPointerDown(event) {
+    event.preventDefault();
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* 캡처를 지원하지 않는 입력 */ }
+    onChange(levelFromEvent(event));
+  }
+
+  function onPointerMove(event) {
+    if (!event.currentTarget.hasPointerCapture?.(event.pointerId)) return;
+    onChange(levelFromEvent(event));
+  }
+
+  const angle = -140 + (value / 100) * 280;
+  return (
+    <div className="peer-knob">
+      <button
+        type="button"
+        className="knob"
+        ref={dial}
+        style={{ '--fill': `${(value / 100) * 77.8}%` }}
+        aria-label={`${name} 소리 크기`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={value}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onWheel={(event) => {
+          event.preventDefault();
+          const step = event.deltaY < 0 ? 5 : -5;
+          onChange(clampLevel(valueRef.current + step, 0, 100, valueRef.current));
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowUp' || event.key === 'ArrowRight') {
+            event.preventDefault();
+            onChange(Math.min(100, value + 5));
+          }
+          if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') {
+            event.preventDefault();
+            onChange(Math.max(0, value - 5));
+          }
+        }}
+      >
+        <span className="knob-cap">
+          <span className="knob-mark" style={{ transform: `rotate(${angle}deg)` }} />
+        </span>
+      </button>
+      <span className="knob-value">{value}%</span>
+    </div>
   );
 }
 
@@ -159,6 +245,11 @@ export default function VoiceApp() {
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [roomQuery, setRoomQuery] = useState('');
   const [returnRoom, setReturnRoom] = useState(null);
+  const savedPeerRef = useRef(loadPeerStore());
+  const peerLevelsRef = useRef({});
+  const openVolumeRef = useRef('');
+  const [peerLevels, setPeerLevels] = useState({});
+  const [openVolumeId, setOpenVolumeId] = useState('');
 
   function showToast(message) {
     setToast(message);
@@ -210,6 +301,7 @@ export default function VoiceApp() {
     }
     participantsRef.current = sorted;
     setParticipants(sorted);
+    rememberPeerLevels(sorted);
     for (const person of sorted) {
       if (person.id !== socketRef.current?.id && !person.sharing) remoteVideos.current.delete(person.id);
     }
@@ -229,16 +321,80 @@ export default function VoiceApp() {
     return audioSettingsRef.current.speakerLevel / 100;
   }
 
+  function gainFor(peerId) {
+    if (meRef.current.deafened) return 0;
+    const master = audioSettingsRef.current.speakerLevel / 100;
+    const peer = clampLevel(peerLevelsRef.current[peerId] ?? 100, 0, 100, 100) / 100;
+    return master * peer;
+  }
+
   function applyOutput() {
-    const volume = outputVolume();
     const speakerId = audioSettingsRef.current.speakerId;
+    const ctx = audioCtxRef.current;
+    if (ctx && typeof ctx.setSinkId === 'function' && ctx._sink !== speakerId) {
+      ctx._sink = speakerId;
+      ctx.setSinkId(speakerId || '').catch(() => {});
+    }
     remoteAudios.current.forEach((audio) => {
-      audio.volume = volume;
-      audio.muted = volume <= 0;
-      if (speakerId && typeof audio.setSinkId === 'function') {
+      const level = gainFor(audio.dataset.peer);
+      if (audio._gain) audio._gain.gain.value = level;
+      audio.volume = audio._gain ? 1 : Math.min(1, level);
+      audio.muted = level <= 0;
+      if (!audio._gain && speakerId && typeof audio.setSinkId === 'function') {
         audio.setSinkId(speakerId).catch(() => {});
       }
+      if (level > 0 && audio.paused) audio.play().catch(() => {});
     });
+  }
+
+  function rememberPeerLevels(list) {
+    const next = {};
+    for (const person of list) {
+      if (person.id === socketRef.current?.id) continue;
+      const current = peerLevelsRef.current[person.id];
+      next[person.id] = current == null
+        ? clampLevel(savedPeerRef.current[person.nickname], 0, 100, 100)
+        : clampLevel(current, 0, 100, 100);
+    }
+    const prev = peerLevelsRef.current;
+    const prevKeys = Object.keys(prev);
+    const nextKeys = Object.keys(next);
+    let changed = prevKeys.length !== nextKeys.length;
+    if (!changed) {
+      for (const key of nextKeys) {
+        if (prev[key] !== next[key]) changed = true;
+      }
+    }
+    peerLevelsRef.current = next;
+    if (changed) setPeerLevels(next);
+    applyOutput();
+  }
+
+  function setOpenVolume(id) {
+    openVolumeRef.current = id;
+    setOpenVolumeId(id);
+  }
+
+  function changePeerLevel(person, value) {
+    const level = clampLevel(value, 0, 100, 100);
+    const next = { ...peerLevelsRef.current, [person.id]: level };
+    peerLevelsRef.current = next;
+    setPeerLevels(next);
+    const nick = cleanName(person.nickname, 16);
+    if (nick) {
+      savedPeerRef.current = { ...savedPeerRef.current, [nick]: level };
+      storePeerStore(savedPeerRef.current);
+    }
+    applyOutput();
+  }
+
+  function releaseRemoteAudios() {
+    remoteAudios.current.forEach((audio) => {
+      audio.srcObject = null;
+      try { audio._source?.disconnect(); } catch { /* already stopped */ }
+      try { audio._gain?.disconnect(); } catch { /* already stopped */ }
+    });
+    remoteAudios.current = [];
   }
 
   function applyMic(stream, flags = meRef.current) {
@@ -412,8 +568,7 @@ export default function VoiceApp() {
     stopShare();
     rtcRef.current.closeAll();
     remoteVideos.current.clear();
-    remoteAudios.current.forEach((audio) => { audio.srcObject = null; });
-    remoteAudios.current = [];
+    releaseRemoteAudios();
     const prev = roomRef.current;
     roomRef.current = null;
     rtcRef.current.setRoom(null);
@@ -668,15 +823,23 @@ export default function VoiceApp() {
           audio.autoplay = true;
           audio.dataset.peer = peerId;
           audio.srcObject = new MediaStream([track]);
-          audio.volume = outputVolume();
-          audio.muted = audio.volume <= 0;
-          if (audioSettingsRef.current.speakerId && typeof audio.setSinkId === 'function') {
-            audio.setSinkId(audioSettingsRef.current.speakerId).catch(() => {});
-          }
-          audio.play().catch(() => {});
+          const ctx = ensureContext();
+          try {
+            const source = ctx.createMediaElementSource(audio);
+            const gain = ctx.createGain();
+            gain.gain.value = gainFor(peerId);
+            source.connect(gain);
+            gain.connect(ctx.destination);
+            audio._source = source;
+            audio._gain = gain;
+          } catch { /* 요소 볼륨으로 듣습니다 */ }
           remoteAudios.current.push(audio);
+          applyOutput();
+          audio.play().catch(() => {});
           track.addEventListener('ended', () => {
             audio.srcObject = null;
+            try { audio._source?.disconnect(); } catch { /* already stopped */ }
+            try { audio._gain?.disconnect(); } catch { /* already stopped */ }
             remoteAudios.current = remoteAudios.current.filter((item) => item !== audio);
           });
           return;
@@ -716,6 +879,7 @@ export default function VoiceApp() {
       if (roomRef.current) {
         rtc.closeAll();
         remoteVideos.current.clear();
+        releaseRemoteAudios();
         roomRef.current = null;
         roomMetaRef.current = null;
         setRoom(null);
@@ -752,6 +916,11 @@ export default function VoiceApp() {
     socket.on('signal', (message) => rtc.handleSignal(message));
 
     const onKey = (event) => {
+      if (event.key === 'Escape' && openVolumeRef.current) {
+        openVolumeRef.current = '';
+        setOpenVolumeId('');
+        return;
+      }
       if (event.key === 'Escape' && directoryOpenRef.current) {
         directoryOpenRef.current = false;
         setDirectoryOpen(false);
@@ -774,6 +943,16 @@ export default function VoiceApp() {
     // Mount once. Handlers read the latest values through refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!openVolumeId) return undefined;
+    const close = (event) => {
+      if (event.target.closest('.peer-sound, .peer-knob')) return;
+      setOpenVolume('');
+    };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [openVolumeId]);
 
   useEffect(() => {
     document.body.dataset.view = room ? 'call' : 'lobby';
@@ -1086,7 +1265,27 @@ export default function VoiceApp() {
                 return (
                   <article key={person.id} className={`member${speaking[person.id] ? ' speaking' : ''}`}>
                     <div className="avatar" style={{ background: `linear-gradient(160deg, hsl(${color} 85% 62%), hsl(${(color + 36) % 360} 70% 42%))` }}>{initial(view.nickname)}</div>
-                    <strong className="member-name">{view.nickname}{self ? <span className="me-badge">나</span> : null}</strong>
+                    <div className="member-title">
+                      <strong className="member-name">{view.nickname}{self ? <span className="me-badge">나</span> : null}</strong>
+                      {self ? null : (
+                        <button
+                          type="button"
+                          className={`peer-sound${(peerLevels[person.id] ?? 100) === 100 ? '' : ' is-custom'}${openVolumeId === person.id ? ' is-open' : ''}`}
+                          aria-label={`${view.nickname} 소리 조절`}
+                          aria-expanded={openVolumeId === person.id}
+                          onClick={() => setOpenVolume(openVolumeId === person.id ? '' : person.id)}
+                        >
+                          <Icon name={(peerLevels[person.id] ?? 100) <= 0 ? 'volumeOff' : 'volume'} />
+                        </button>
+                      )}
+                      {!self && openVolumeId === person.id ? (
+                        <VolumeKnob
+                          value={peerLevels[person.id] ?? 100}
+                          name={view.nickname}
+                          onChange={(level) => changePeerLevel(person, level)}
+                        />
+                      ) : null}
+                    </div>
                     {status ? <span className="member-status">{status}</span> : null}
                     <div className="flags">
                       {view.muted ? <Icon name="micOff" /> : null}
@@ -1120,7 +1319,7 @@ export default function VoiceApp() {
                   <span className="ctrl-label">나가기</span>
                 </button>
               </div>
-              <p className="hint">M 키는 마이크만 껐다 켭니다. 소리 끄기는 듣기만 막고, 내 목소리는 그대로 나갑니다.</p>
+              <p className="hint">M 키는 마이크만 껐다 켭니다. 소리 끄기는 듣기만 막고, 내 목소리는 그대로 나갑니다. 이름 옆 소리 아이콘을 누르면 그 사람 소리만 조절할 수 있어요.</p>
             </footer>
           </section>
         )}

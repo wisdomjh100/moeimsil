@@ -440,6 +440,7 @@ input[type="range"] {
 }
 #call.has-stage .member { min-width: 180px; flex: 0 0 180px; }
 .member {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -450,6 +451,7 @@ input[type="range"] {
   border: 1px solid var(--line);
   text-align: center;
 }
+.member:has(.peer-knob) { z-index: 3; }
 .avatar {
   width: 72px;
   height: 72px;
@@ -464,7 +466,90 @@ input[type="range"] {
 .member.speaking .avatar {
   box-shadow: 0 0 0 3px #0c0e14, 0 0 0 6px var(--ok);
 }
-.member-name { font-size: 15px; }
+.member-title {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  max-width: 100%;
+}
+.member-name {
+  min-width: 0;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.peer-sound {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}
+.peer-sound svg { width: 15px; height: 15px; }
+.peer-sound:hover, .peer-sound.is-open, .peer-sound.is-custom {
+  color: var(--accent-2);
+  background: rgba(62, 224, 197, 0.14);
+}
+.peer-knob {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  z-index: 4;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 112px;
+  padding: 12px 10px 10px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #171b26;
+  box-shadow: var(--shadow);
+}
+.knob {
+  width: 68px;
+  height: 68px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  background: conic-gradient(from 220deg, var(--accent) var(--fill), rgba(255, 255, 255, 0.12) 0);
+  touch-action: none;
+}
+.knob:active { cursor: grabbing; }
+.knob-cap {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #222838;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.knob-mark {
+  position: absolute;
+  left: 50%;
+  top: 7px;
+  width: 3px;
+  height: 12px;
+  margin-left: -1.5px;
+  border-radius: 999px;
+  background: var(--accent-2);
+  transform-origin: 50% 17px;
+}
+.knob-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
 .me-badge {
   margin-left: 4px;
   font-size: 11px;
