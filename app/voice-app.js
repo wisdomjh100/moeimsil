@@ -331,16 +331,18 @@ export default function VoiceApp() {
   function applyOutput() {
     const speakerId = audioSettingsRef.current.speakerId;
     const ctx = audioCtxRef.current;
-    if (ctx && typeof ctx.setSinkId === 'function' && ctx._sink !== speakerId) {
+    ctx?.resume().catch(() => {});
+    if (ctx && speakerId && typeof ctx.setSinkId === 'function' && ctx._sink !== speakerId) {
       ctx._sink = speakerId;
-      ctx.setSinkId(speakerId || '').catch(() => {});
+      ctx.setSinkId(speakerId).catch(() => {});
     }
     remoteAudios.current.forEach((audio) => {
-      const level = gainFor(audio.dataset.peer);
+      const level = Math.min(1, Math.max(0, gainFor(audio.dataset.peer)));
       if (audio._gain) audio._gain.gain.value = level;
-      audio.volume = audio._gain ? 1 : Math.min(1, level);
+      else audio.volume = level;
       audio.muted = level <= 0;
-      if (!audio._gain && speakerId && typeof audio.setSinkId === 'function') {
+      if (!audio._gain && speakerId && typeof audio.setSinkId === 'function' && audio._sink !== speakerId) {
+        audio._sink = speakerId;
         audio.setSinkId(speakerId).catch(() => {});
       }
       if (level > 0 && audio.paused) audio.play().catch(() => {});
@@ -391,6 +393,7 @@ export default function VoiceApp() {
   function releaseRemoteAudios() {
     remoteAudios.current.forEach((audio) => {
       audio.srcObject = null;
+      if (audio._keeper) audio._keeper.srcObject = null;
       try { audio._source?.disconnect(); } catch { /* already stopped */ }
       try { audio._gain?.disconnect(); } catch { /* already stopped */ }
     });
@@ -819,28 +822,41 @@ export default function VoiceApp() {
       socket,
       onTrack: (peerId, track) => {
         if (track.kind === 'audio') {
-          const audio = new Audio();
-          audio.autoplay = true;
-          audio.dataset.peer = peerId;
-          audio.srcObject = new MediaStream([track]);
+          const stream = new MediaStream([track]);
           const ctx = ensureContext();
-          try {
-            const source = ctx.createMediaElementSource(audio);
-            const gain = ctx.createGain();
-            gain.gain.value = gainFor(peerId);
-            source.connect(gain);
-            gain.connect(ctx.destination);
-            audio._source = source;
-            audio._gain = gain;
-          } catch { /* 요소 볼륨으로 듣습니다 */ }
-          remoteAudios.current.push(audio);
+          const source = ctx.createMediaStreamSource(stream);
+          const gain = ctx.createGain();
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+          source.connect(gain);
+          gain.connect(ctx.destination);
+          const keeper = new Audio();
+          keeper.autoplay = true;
+          keeper.muted = true;
+          keeper.volume = 0;
+          keeper.srcObject = stream;
+          keeper.play().catch(() => {});
+          const playback = {
+            dataset: { peer: peerId, analysed: '1' },
+            srcObject: stream,
+            _source: source,
+            _gain: gain,
+            _analyser: analyser,
+            _keeper: keeper,
+            volume: 1,
+            muted: false,
+            paused: false,
+            play() { return ctx.resume().catch(() => {}); },
+          };
+          remoteAudios.current.push(playback);
           applyOutput();
-          audio.play().catch(() => {});
           track.addEventListener('ended', () => {
-            audio.srcObject = null;
-            try { audio._source?.disconnect(); } catch { /* already stopped */ }
-            try { audio._gain?.disconnect(); } catch { /* already stopped */ }
-            remoteAudios.current = remoteAudios.current.filter((item) => item !== audio);
+            playback.srcObject = null;
+            keeper.srcObject = null;
+            try { source.disconnect(); } catch { /* already stopped */ }
+            try { gain.disconnect(); } catch { /* already stopped */ }
+            remoteAudios.current = remoteAudios.current.filter((item) => item !== playback);
           });
           return;
         }
