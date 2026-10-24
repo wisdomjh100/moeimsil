@@ -3,12 +3,20 @@ const ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
+const SHARE_PRESETS = {
+  high: { maxBitrate: 2500000, maxFramerate: 30, scaleResolutionDownBy: 1, degradationPreference: 'maintain-resolution' },
+  medium: { maxBitrate: 1200000, maxFramerate: 24, scaleResolutionDownBy: 1, degradationPreference: 'balanced' },
+  low: { maxBitrate: 450000, maxFramerate: 12, scaleResolutionDownBy: 2, degradationPreference: 'maintain-framerate' },
+};
+
 export function createRtcSession({ socket, onTrack, onConnection }) {
   const peers = new Map();
   const signalQueue = [];
   let localStream = null;
   let micTrack = null;
   let screenStream = null;
+  let outboundQuality = 'medium';
+  const peerQuality = new Map();
   let activeRoomId = null;
   let mediaReady = false;
 
@@ -123,8 +131,43 @@ export function createRtcSession({ socket, onTrack, onConnection }) {
 
     addStreamTracks(pc, localStream);
     addStreamTracks(pc, screenStream);
+    if (screenStream) {
+      const level = peerQuality.get(remoteId) || outboundQuality;
+      queueMicrotask(() => applyShareQuality(peer, level));
+      setTimeout(() => applyShareQuality(peer, level), 800);
+    }
     onConnection(remoteId, 'connecting');
     return peer;
+  }
+
+  function screenSender(peer) {
+    const video = screenStream?.getVideoTracks().find((track) => track.readyState === 'live');
+    if (!video) return null;
+    return peer.pc.getSenders().find((sender) => sender.track === video) || null;
+  }
+
+  async function applyShareQuality(peer, level) {
+    if (!peer || peer.closed) return;
+    const preset = SHARE_PRESETS[level] || SHARE_PRESETS.medium;
+    const sender = screenSender(peer);
+    if (!sender?.getParameters) return;
+    const params = sender.getParameters();
+    if (!params.encodings?.length) params.encodings = [{}];
+    params.encodings[0].maxBitrate = preset.maxBitrate;
+    params.encodings[0].maxFramerate = preset.maxFramerate;
+    params.encodings[0].scaleResolutionDownBy = preset.scaleResolutionDownBy;
+    params.degradationPreference = preset.degradationPreference;
+    try {
+      await sender.setParameters(params);
+    } catch (err) {
+      console.warn(err);
+    }
+  }
+
+  function pushOutboundQuality() {
+    for (const [id, peer] of peers) {
+      applyShareQuality(peer, peerQuality.get(id) || outboundQuality);
+    }
   }
 
   function closePeer(id) {
@@ -135,6 +178,7 @@ export function createRtcSession({ socket, onTrack, onConnection }) {
     peer.pc.ontrack = null;
     try { peer.pc.close(); } catch (err) { console.warn(err); }
     peers.delete(id);
+    peerQuality.delete(id);
   }
 
   return {
@@ -179,10 +223,25 @@ export function createRtcSession({ socket, onTrack, onConnection }) {
       for (const peer of peers.values()) {
         if (!peer.closed) addStreamTracks(peer.pc, stream);
       }
+      pushOutboundQuality();
+      setTimeout(pushOutboundQuality, 800);
+    },
+    setOutboundQuality(level) {
+      if (!SHARE_PRESETS[level]) return;
+      outboundQuality = level;
+      peerQuality.clear();
+      pushOutboundQuality();
+    },
+    setPeerShareQuality(remoteId, level) {
+      if (!remoteId || !SHARE_PRESETS[level]) return;
+      peerQuality.set(remoteId, level);
+      const peer = peers.get(remoteId);
+      if (peer) applyShareQuality(peer, level);
     },
     stopScreen(stream) {
       const tracks = stream?.getTracks() || [];
       screenStream = null;
+      peerQuality.clear();
       for (const peer of peers.values()) {
         if (peer.closed) continue;
         for (const transceiver of peer.pc.getTransceivers()) {
@@ -196,6 +255,7 @@ export function createRtcSession({ socket, onTrack, onConnection }) {
     closeAll() {
       for (const id of [...peers.keys()]) closePeer(id);
       signalQueue.splice(0);
+      peerQuality.clear();
     },
   };
 }

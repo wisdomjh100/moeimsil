@@ -7,6 +7,12 @@ import { createRtcSession } from './webrtc';
 const NICK_KEY = 'moeim-nickname';
 const AUDIO_KEY = 'moeim-audio';
 const PEER_KEY = 'moeim-peer-levels';
+const SHARE_KEY = 'moeim-share-quality';
+const SHARE_CAPTURE = {
+  high: { width: 1920, height: 1080, frameRate: 30 },
+  medium: { width: 1280, height: 720, frameRate: 24 },
+  low: { width: 960, height: 540, frameRate: 12 },
+};
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 
 function cleanName(value, max) {
@@ -74,6 +80,21 @@ function loadPeerStore() {
 
 function storePeerStore(value) {
   try { localStorage.setItem(PEER_KEY, JSON.stringify(value)); } catch { /* private mode */ }
+}
+
+function loadShareQuality() {
+  try {
+    const saved = localStorage.getItem(SHARE_KEY);
+    return SHARE_CAPTURE[saved] ? saved : 'medium';
+  } catch {
+    return 'medium';
+  }
+}
+
+function formatClock(stamp) {
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
 function clampLevel(value, min, max, fallback) {
@@ -175,18 +196,48 @@ function VolumeKnob({ value, name, onChange }) {
   );
 }
 
-function ScreenVideo({ track, label, muted }) {
-  const ref = useRef(null);
+function ScreenVideo({ track, label, muted, quality, onQuality, onFail, allowFull }) {
+  const frameRef = useRef(null);
+  const videoRef = useRef(null);
+  const [full, setFull] = useState(false);
   useEffect(() => {
-    const video = ref.current;
+    const video = videoRef.current;
     if (!video) return undefined;
     video.srcObject = new MediaStream([track]);
     video.play().catch(() => {});
     return () => { video.srcObject = null; };
   }, [track]);
+  useEffect(() => {
+    const onChange = () => setFull(document.fullscreenElement === frameRef.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  async function toggleFull() {
+    const node = frameRef.current;
+    if (!node?.requestFullscreen) {
+      onFail?.();
+      return;
+    }
+    try {
+      if (document.fullscreenElement === node) await document.exitFullscreen();
+      else await node.requestFullscreen();
+    } catch {
+      onFail?.();
+    }
+  }
+
   return (
-    <figure className="tile">
-      <video ref={ref} autoPlay playsInline muted={muted} />
+    <figure className={`tile${full ? ' is-full' : ''}`} ref={frameRef}>
+      <video ref={videoRef} autoPlay playsInline muted={muted} onDoubleClick={allowFull ? toggleFull : undefined} />
+      <div className="tile-tools">
+        <select aria-label={`${label} 화질`} value={quality} onChange={(event) => onQuality(event.target.value)}>
+          <option value="high">선명</option>
+          <option value="medium">보통</option>
+          <option value="low">가볍게</option>
+        </select>
+        {allowFull ? <button type="button" onClick={toggleFull}>{full ? '전체화면 종료' : '전체화면'}</button> : null}
+      </div>
       <figcaption>{label}</figcaption>
     </figure>
   );
@@ -245,6 +296,16 @@ export default function VoiceApp() {
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [roomQuery, setRoomQuery] = useState('');
   const [returnRoom, setReturnRoom] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [chatDraft, setChatDraft] = useState('');
+  const [chatOpen, setChatOpen] = useState(true);
+  const [unread, setUnread] = useState(0);
+  const [shareQuality, setShareQuality] = useState('medium');
+  const [watchQuality, setWatchQuality] = useState({});
+  const chatRoomRef = useRef('');
+  const chatOpenRef = useRef(true);
+  const chatLogRef = useRef(null);
+  const shareQualityRef = useRef('medium');
   const savedPeerRef = useRef(loadPeerStore());
   const peerLevelsRef = useRef({});
   const openVolumeRef = useRef('');
@@ -583,6 +644,7 @@ export default function VoiceApp() {
       closeDirectory();
     }
     setScreenTrack(null);
+    if (!keepView) clearChat();
     if (prev && notify) await emitAck('room:leave');
     if (!keepMic) {
       releaseMicGraph();
@@ -605,6 +667,7 @@ export default function VoiceApp() {
         showToast(res.message || '방을 만들지 못했어요.');
         return;
       }
+      acceptChat(res.room.id, res.messages);
       if (roomRef.current) {
         pinReturnRoom();
         await leaveRoom({ keepMic: true, notify: false, keepView: true });
@@ -635,6 +698,7 @@ export default function VoiceApp() {
         showToast(res.message || '방에 들어가지 못했어요.');
         return;
       }
+      acceptChat(res.room.id, res.messages);
       if (switching) {
         if (!returning) pinReturnRoom();
         await leaveRoom({ keepMic: true, notify: false, keepView: true });
@@ -689,6 +753,70 @@ export default function VoiceApp() {
     if (stream) rtcRef.current.stopScreen(stream);
   }
 
+  function clearChat() {
+    chatRoomRef.current = '';
+    setMessages([]);
+    setUnread(0);
+    setChatDraft('');
+  }
+
+  function acceptChat(roomId, history) {
+    chatRoomRef.current = roomId;
+    const incoming = Array.isArray(history) ? history : [];
+    setMessages((prev) => {
+      const extras = prev.filter((item) => item.roomId === roomId && !incoming.some((message) => message.id === item.id));
+      return [...incoming, ...extras].slice(-80);
+    });
+  }
+
+  async function sendChat(event) {
+    event.preventDefault();
+    const text = chatDraft.replace(/\s+/g, ' ').trim();
+    if (!text || !roomRef.current) return;
+    setChatDraft('');
+    const res = await emitAck('chat:send', { text });
+    if (!res.ok) {
+      setChatDraft(text);
+      showToast(res.message || '메시지를 보내지 못했어요.');
+    }
+  }
+
+  function toggleChat() {
+    setChatOpen((open) => {
+      const next = !open;
+      chatOpenRef.current = next;
+      if (next) setUnread(0);
+      return next;
+    });
+  }
+
+  async function applyCaptureQuality(track, level) {
+    const preset = SHARE_CAPTURE[level] || SHARE_CAPTURE.medium;
+    if (!track?.applyConstraints) return;
+    try {
+      await track.applyConstraints({
+        width: { ideal: preset.width },
+        height: { ideal: preset.height },
+        frameRate: { ideal: preset.frameRate, max: preset.frameRate },
+      });
+    } catch { /* 브라우저가 해상도 변경을 거절할 수 있어요 */ }
+  }
+
+  function changeSendQuality(level) {
+    if (!SHARE_CAPTURE[level]) return;
+    shareQualityRef.current = level;
+    setShareQuality(level);
+    try { localStorage.setItem(SHARE_KEY, level); } catch { /* private mode */ }
+    rtcRef.current?.setOutboundQuality(level);
+    if (screenTrack) applyCaptureQuality(screenTrack, level);
+  }
+
+  function changeWatchQuality(peerId, level) {
+    if (!SHARE_CAPTURE[level] || !peerId) return;
+    setWatchQuality((prev) => ({ ...prev, [peerId]: level }));
+    socketRef.current?.emit('share:quality', { to: peerId, level });
+  }
+
   async function toggleScreen() {
     if (!roomRef.current) return;
     unlockAudio();
@@ -700,10 +828,15 @@ export default function VoiceApp() {
       showToast('이 브라우저에서는 화면 공유를 쓸 수 없어요.');
       return;
     }
+    const capture = SHARE_CAPTURE[shareQualityRef.current] || SHARE_CAPTURE.medium;
     let stream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30, max: 60 } },
+        video: {
+          width: { ideal: capture.width },
+          height: { ideal: capture.height },
+          frameRate: { ideal: capture.frameRate, max: capture.frameRate },
+        },
         audio: true,
       });
     } catch (err) {
@@ -716,9 +849,11 @@ export default function VoiceApp() {
       }
     }
     const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) videoTrack.contentHint = 'detail';
     videoTrack?.addEventListener('ended', () => stopShare());
     rtcRef.current.screenStream = stream;
     rtcRef.current.publishScreen(stream);
+    rtcRef.current.setOutboundQuality(shareQualityRef.current);
     setScreenTrack(videoTrack || null);
     const next = patchMe({ sharing: true });
     pushState(next);
@@ -815,6 +950,9 @@ export default function VoiceApp() {
     setNickname(initialNick);
     if (!saved) storeNick(initialNick);
     setSecure(window.isSecureContext);
+    const savedQuality = loadShareQuality();
+    shareQualityRef.current = savedQuality;
+    setShareQuality(savedQuality);
 
     const socket = io({ autoConnect: true });
     socketRef.current = socket;
@@ -903,8 +1041,17 @@ export default function VoiceApp() {
         setScreenTrack(null);
         clearReturnRoom();
         closeDirectory();
+        clearChat();
         showToast('연결이 끊어져 방에서 나왔어요.');
       }
+    });
+    socket.on('chat:message', (message) => {
+      if (!message?.id || message.roomId !== chatRoomRef.current) return;
+      setMessages((prev) => (prev.some((item) => item.id === message.id) ? prev : [...prev, message].slice(-80)));
+      if (!chatOpenRef.current && message.from !== socket.id) setUnread((count) => count + 1);
+    });
+    socket.on('share:quality', ({ from, level } = {}) => {
+      rtc.setPeerShareQuality(from, level);
     });
     socket.on('rooms', (payload) => {
       const list = Array.isArray(payload) ? payload : payload.rooms || [];
@@ -1057,7 +1204,7 @@ export default function VoiceApp() {
   const tiles = useMemo(() => {
     const list = [];
     if (me.sharing && screenTrack && screenTrack.readyState !== 'ended') {
-      list.push({ id: 'local', track: screenTrack, label: '내 화면', muted: true });
+      list.push({ id: 'local', track: screenTrack, label: '내 화면', muted: true, peerId: '' });
     }
     for (const person of participants) {
       if (!person.sharing || person.id === socketId) continue;
@@ -1067,6 +1214,7 @@ export default function VoiceApp() {
         if (track.readyState === 'ended') continue;
         list.push({
           id: `${person.id}:${trackId}`,
+          peerId: person.id,
           track,
           label: `${person.nickname}의 화면`,
           muted: false,
@@ -1081,6 +1229,12 @@ export default function VoiceApp() {
   useEffect(() => {
     if (!tiles.length) setStageCollapsed(false);
   }, [tiles.length]);
+
+  useEffect(() => {
+    const log = chatLogRef.current;
+    if (!log) return;
+    log.scrollTop = log.scrollHeight;
+  }, [messages, chatOpen, room]);
 
   const connLabel = {
     failed: '연결 실패',
@@ -1169,7 +1323,7 @@ export default function VoiceApp() {
         </div>
         <div className="side-section">
         <label className="nick-field">
-          <span>내 별명</span>
+          <span>내 별명 <em>눌러서 수정</em></span>
           <input
             maxLength={16}
             value={nickname}
@@ -1188,7 +1342,7 @@ export default function VoiceApp() {
             }}
           />
         </label>
-        <p className="nick-help">이 별명으로 보여요. 계정은 필요 없어요.</p>
+        <p className="nick-help">이 칸을 눌러 별명을 바꾸면 바로 적용돼요. 계정은 필요 없어요.</p>
         </div>
         <div className="side-section">
         <button className="btn secondary block" type="button" onClick={openSettings}>소리 설정</button>
@@ -1248,7 +1402,12 @@ export default function VoiceApp() {
                 <h1>{room.name}</h1>
                 <p className="lede">{participants.length}명 참여 중 · 최대 {maxMembers}명</p>
               </div>
-              <button className="btn secondary" type="button" onClick={openDirectory}>열린 방</button>
+              <div className="call-actions">
+                <button className="btn secondary" type="button" onClick={toggleChat}>
+                  {chatOpen ? '채팅 닫기' : `채팅${unread ? ` ${unread}` : ''}`}
+                </button>
+                <button className="btn secondary" type="button" onClick={openDirectory}>열린 방</button>
+              </div>
             </header>
             {canReturn ? (
               <div className="return-bar">
@@ -1257,9 +1416,11 @@ export default function VoiceApp() {
               </div>
             ) : null}
             {micError ? <p className="banner">{micError}</p> : null}
+            <div className={`call-split${chatOpen ? '' : ' chat-closed'}`}>
+            <div className="call-main">
             {tiles.length ? (
               <div className="stage-bar">
-                <span>{stageCollapsed ? '화면 공유를 접어 두었어요' : '화면이 공유되고 있어요'}</span>
+                <span>{stageCollapsed ? '화면 공유를 접어 두었어요' : '보는 사람만 전체화면으로 볼 수 있어요. 화질은 화면 위에서 바꿀 수 있어요.'}</span>
                 <button type="button" onClick={() => setStageCollapsed((value) => !value)}>
                   {stageCollapsed ? '화면 보기' : '화면 접기'}
                 </button>
@@ -1268,7 +1429,16 @@ export default function VoiceApp() {
             {tiles.length && !stageCollapsed ? (
               <div className="stage">
                 {tiles.map((tile) => (
-                  <ScreenVideo key={tile.id} track={tile.track} label={tile.label} muted={tile.muted} />
+                  <ScreenVideo
+                    key={tile.id}
+                    track={tile.track}
+                    label={tile.label}
+                    muted={tile.muted}
+                    allowFull={Boolean(tile.peerId)}
+                    quality={tile.peerId ? (watchQuality[tile.peerId] || 'medium') : shareQuality}
+                    onQuality={(level) => (tile.peerId ? changeWatchQuality(tile.peerId, level) : changeSendQuality(level))}
+                    onFail={() => showToast('이 브라우저에서는 전체화면을 쓸 수 없어요.')}
+                  />
                 ))}
               </div>
             ) : null}
@@ -1311,6 +1481,31 @@ export default function VoiceApp() {
                   </article>
                 );
               })}
+            </div>
+            </div>
+            {chatOpen ? (
+              <aside className="chat-panel">
+                <h2>채팅</h2>
+                <div className="chat-log" ref={chatLogRef} role="log" aria-live="polite">
+                  {messages.length === 0 ? <p className="chat-empty">아직 메시지가 없어요.</p> : messages.map((message) => (
+                    <article key={message.id} className={`chat-line${message.from === socketId ? ' mine' : ''}`}>
+                      <strong>{message.nickname}<time dateTime={new Date(message.sentAt).toISOString()}>{formatClock(message.sentAt)}</time></strong>
+                      <p>{message.text}</p>
+                    </article>
+                  ))}
+                </div>
+                <form className="chat-form" onSubmit={sendChat}>
+                  <input
+                    maxLength={200}
+                    value={chatDraft}
+                    placeholder="메시지"
+                    aria-label="채팅 메시지"
+                    onChange={(event) => setChatDraft(event.target.value)}
+                  />
+                  <button className="btn" type="submit">보내기</button>
+                </form>
+              </aside>
+            ) : null}
             </div>
             <footer className="dock">
               <div className="controls">
